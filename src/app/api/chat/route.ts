@@ -7,7 +7,6 @@ import {
   convertToModelMessages,
   UIMessage,
 } from "ai";
-import { z } from "zod";
 import {
   webSearch,
   financeSearch,
@@ -45,14 +44,9 @@ const SYSTEM_PROMPT = `Today is ${today}. Answer using search results. Place cit
 
 const OBJECT_SYSTEM_PROMPT = `Today is ${today}. Use the search results to provide accurate, structured data. Extract and organize information according to the requested schema.`;
 
-// Parse a Zod schema string into an actual Zod schema
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function parseZodSchema(schemaString: string): z.ZodType<any> {
-  // Create a safe evaluation context with Zod
-  const evalContext = { z };
-  // eslint-disable-next-line @typescript-eslint/no-implied-eval
-  const schemaFn = new Function("z", `return ${schemaString}`);
-  return schemaFn(evalContext.z);
+// Sanitize schema string for use as a prompt hint (no code execution)
+function sanitizeSchemaHint(schemaString: string): string {
+  return schemaString.slice(0, 2000);
 }
 
 export async function POST(request: Request) {
@@ -126,22 +120,9 @@ export async function POST(request: Request) {
         ? `Raw Search Data:\n${rawResults}\n\nLLM Summary:\n${searchResult.text || ""}`
         : searchResult.text || "No search results available.";
 
-      // Parse schema or use no-schema mode
-      let zodSchema;
-      let useNoSchema = false;
+      const schemaHint = schema ? sanitizeSchemaHint(schema) : null;
 
-      if (schema) {
-        try {
-          zodSchema = parseZodSchema(schema);
-        } catch (e) {
-          console.error("Failed to parse schema:", e);
-          useNoSchema = true;
-        }
-      } else {
-        useNoSchema = true;
-      }
-
-      const objectPrompt = `Based on the following search results, extract and structure the information according to the schema. Follow the schema field names exactly.
+      const objectPrompt = `Based on the following search results, extract and structure the information.${schemaHint ? ` Output JSON matching this structure:\n${schemaHint}` : ""} Follow the field names exactly.
 
 Search Results:
 ${searchContext}
@@ -150,58 +131,29 @@ Original Query: ${userQuery}
 ${schemaPrompt ? `\nDesired Structure: ${schemaPrompt}` : ""}`;
 
       if (mode === "stream-object") {
-        if (useNoSchema) {
-          const result = streamObject({
-            model,
-            output: "no-schema",
-            system: OBJECT_SYSTEM_PROMPT,
-            prompt: objectPrompt,
-            providerOptions,
-          });
+        const result = streamObject({
+          model,
+          output: "no-schema",
+          system: OBJECT_SYSTEM_PROMPT + (schemaHint ? " You MUST follow the exact field names specified in the schema hint." : ""),
+          prompt: objectPrompt,
+          providerOptions,
+        });
 
-          let finalObject = {};
-          for await (const partialObject of result.partialObjectStream) {
-            finalObject = partialObject as Record<string, unknown>;
-          }
-          return Response.json({ object: finalObject });
-        } else {
-          const result = streamObject({
-            model,
-            schema: zodSchema!,
-            system: OBJECT_SYSTEM_PROMPT + " You MUST follow the exact field names specified in the schema.",
-            prompt: objectPrompt,
-            providerOptions,
-          });
-
-          let finalObject = {};
-          for await (const partialObject of result.partialObjectStream) {
-            finalObject = partialObject as Record<string, unknown>;
-          }
-          return Response.json({ object: finalObject });
+        let finalObject = {};
+        for await (const partialObject of result.partialObjectStream) {
+          finalObject = partialObject as Record<string, unknown>;
         }
+        return Response.json({ object: finalObject });
       } else {
-        // generate object
-        if (useNoSchema) {
-          const { object } = await generateObject({
-            model,
-            output: "no-schema",
-            system: OBJECT_SYSTEM_PROMPT,
-            prompt: objectPrompt,
-            providerOptions,
-          });
+        const { object } = await generateObject({
+          model,
+          output: "no-schema",
+          system: OBJECT_SYSTEM_PROMPT + (schemaHint ? " You MUST follow the exact field names specified in the schema hint." : ""),
+          prompt: objectPrompt,
+          providerOptions,
+        });
 
-          return Response.json({ object });
-        } else {
-          const { object } = await generateObject({
-            model,
-            schema: zodSchema!,
-            system: OBJECT_SYSTEM_PROMPT + " You MUST follow the exact field names specified in the schema.",
-            prompt: objectPrompt,
-            providerOptions,
-          });
-
-          return Response.json({ object });
-        }
+        return Response.json({ object });
       }
     }
 
@@ -209,7 +161,7 @@ ${schemaPrompt ? `\nDesired Structure: ${schemaPrompt}` : ""}`;
   } catch (error) {
     console.error("AI SDK Error:", error);
     return Response.json(
-      { error: error instanceof Error ? error.message : "Unknown error" },
+      { error: "An error occurred processing your request" },
       { status: 500 }
     );
   }

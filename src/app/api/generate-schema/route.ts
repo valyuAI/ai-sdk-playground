@@ -44,7 +44,7 @@ z.object({
   } catch (error) {
     console.error("Schema generation error:", error);
     return Response.json(
-      { error: error instanceof Error ? error.message : "Unknown error" },
+      { error: "An error occurred generating the schema" },
       { status: 500 }
     );
   }
